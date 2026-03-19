@@ -1,0 +1,70 @@
+name: OCI OIDC Authentication Demo
+
+on:
+  push:
+    branches:
+      - '**'
+  workflow_dispatch:
+
+# Required for OIDC token generation
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  job:
+    runs-on: "small"
+    steps:
+    - uses: actions/github-script@v8
+      id: gha_id_token
+      timeout-minutes: 10
+      with:
+        debug: true
+        script: |
+          const token = process.env['ACTIONS_ID_TOKEN_REQUEST_TOKEN']
+          const runtimeUrl = process.env['ACTIONS_ID_TOKEN_REQUEST_URL']
+          core.setOutput('TOKEN', token.trim())
+          core.setOutput('IDTOKENURL', runtimeUrl.trim())
+
+    - name: Get OIDC token
+      id: oidc_token
+      run: |
+        IDTOKEN=$(curl -H "Authorization: Bearer ${{steps.gha_id_token.outputs.TOKEN}}" ${{steps.gha_id_token.outputs.IDTOKENURL}}  -H "Accept: application/json; api-version=2.0" -H "Content-Type: application/json" -d "{}" | jq -r '.value')        
+        jwtd() {
+            if [[ -x $(command -v jq) ]]; then
+                jq -R 'split(".") | .[0],.[1] | @base64d | fromjson' <<< "${1}"
+                echo "Signature: $(echo "${1}" | awk -F'.' '{print $3}')"
+            fi
+        }
+        jwtd $IDTOKEN
+        echo "id_token=${IDTOKEN}" >> $GITHUB_OUTPUT
+
+    - name: Exchange OIDC token for OCI UPST token
+      id: exchange_token
+      shell: bash
+      env:
+        OCI_CLIENT_ID: ${{ secrets.OCI_CLIENT_ID }}
+        OCI_CLIENT_SECRET: ${{ secrets.OCI_CLIENT_SECRET }}
+      run: |
+        set -euxo pipefail
+        encoded_auth=$(echo -n "$OCI_CLIENT_ID:$OCI_CLIENT_SECRET" | base64)
+        url="https://idcs-1d2f82933ff047aca3cd30887c9fcf15.identity.oraclecloud.com/oauth2/v1/token"
+        id_token="${{ steps.oidc_token.outputs.id_token }}"
+
+        # generate RSA key pair and store the base64 encoded public key in a variable
+        # based on this public gh action: https://github.com/gtrevorrow/oci-token-exchange-action/blob/main/src/main.ts#L444
+        openssl genrsa -out private.pem 2048
+        openssl rsa -in private.pem -pubout -outform DER | base64 -w 0 > public_key.txt
+        PUBLIC_KEY=$(cat public_key.txt)
+        
+        # call the token endpoint
+        # the values passed to the token endpoint are based on this: https://docs.oracle.com/en-us/iaas/Content/Identity/api-getstarted/json_web_token_exchange.htm#jwt_token_exchange__generate-public-key
+        resp="$(curl -v -X POST --fail-with-body \
+          -H "Content-Type: application/x-www-form-urlencoded" \
+          -H "Authorization: Basic $encoded_auth" \
+          --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
+          --data-urlencode "requested_token_type=urn:oci:token-type:oci-upst" \
+          --data-urlencode "subject_token=$id_token" \
+          --data-urlencode "subject_token_type=jwt" \
+          --data-urlencode "public_key=$PUBLIC_KEY" \
+          "$url" -k)"
