@@ -24,12 +24,6 @@ jobs:
             | jq -r '.value')
           echo "id_token=$IDTOKEN" >> $GITHUB_OUTPUT
 
-      - name: Decode GitHub OIDC token claims
-        run: |
-          ID_TOKEN="${{ steps.oidc_token.outputs.id_token }}"
-          echo "JWT Claims:"
-          echo $ID_TOKEN | cut -d'.' -f2 | base64 -d 2>/dev/null || echo $ID_TOKEN | cut -d'.' -f2 | base64 --decode --ignore-garbage 2>/dev/null
-
       - name: Exchange OIDC token for OCI UPST
         id: exchange_token
         env:
