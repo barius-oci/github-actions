@@ -1,0 +1,39 @@
+name: OCI Deploy
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write   # required to request the GitHub OIDC token
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Exchange GitHub OIDC token for OCI UPST
+        run: |
+          GITHUB_TOKEN=$(curl -sS \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://github.com/barius-oci" \
+            | jq -r '.value')
+
+          OCI_TOKEN=$(curl -sS -X POST "${{ secrets.OCI_TOKEN_EXCHANGE_ENDPOINT }}" \
+            -u "${{ secrets.OCI_TOKEN_EXCHANGE_CLIENT_ID }}:${{ secrets.OCI_TOKEN_EXCHANGE_CLIENT_SECRET }}" \
+            --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
+            --data-urlencode "subject_token=$GITHUB_TOKEN" \
+            --data-urlencode "subject_token_type=urn:ietf:params:oauth:token-type:jwt" \
+            --data-urlencode "requested_token_type=urn:ietf:params:oauth:token-type:access_token" \
+            | jq -r '.access_token')
+
+          echo "OCI_TOKEN=$OCI_TOKEN" >> $GITHUB_ENV
+
+      - name: Verify OCI access
+        run: |
+          curl -sS \
+            -H "Authorization: Bearer $OCI_TOKEN" \
+            "https://identity.eu-frankfurt-1.oci.oraclecloud.com/20160918/compartments?compartmentId=${{ secrets.OCI_CLI_TENANCY }}" \
+            | jq '.[] | .name'
